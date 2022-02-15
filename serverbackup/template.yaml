@@ -1,0 +1,22 @@
+Guild:
+  - roles:
+    - name
+    - permissions (guildwide)
+    - hoisted
+    - is everyone?
+    - color
+    - mentionable?
+
+  - channels:
+    - ordered (categories)
+    - unordered
+    (
+      - name
+      - topic
+      - permissions overwrites (for roles only)
+      - position
+      - type (text or voice)
+      - last messages
+    )
+
+  - id (secrets.token_urlsafe) 
