@@ -39,7 +39,7 @@ class Template:
         
     @property
     def roles(self):
-        return sorted(self._roles, key=lambda role: role.position)
+        return sorted(self._roles, key=lambda role: role.position, reverse=True)
     
     @property
     def channels(self):
