@@ -240,7 +240,7 @@ class TemplateChannel:
                 # so that messages aren't in reversed order lol
         attrs = {
             "name": channel.name,
-            "topic": channel.topic,
+            "topic": getattr(channel, "topic", None),
             "type": channel.type,
             "permissions": _proper_overwrites_mapping(channel.overwrites),
             "position": channel.position,

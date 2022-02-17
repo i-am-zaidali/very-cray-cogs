@@ -57,7 +57,7 @@ class ServerBackup(commands.Cog):
                 await ctx.send("Backup created and saved with the id: `{}`".format(template.id))
             
             except Exception as e:
-                log.exception(exc_info=e)
+                log.exception("Error occurred while creating backup.", exc_info=e)
             
     @backup.command(name="list")
     async def backup_list(self, ctx: commands.Context):
