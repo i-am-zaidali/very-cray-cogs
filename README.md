@@ -26,7 +26,7 @@
 ## Cogs
 | Name              | Version          | Functionality (Click to see full description)                                                                                                              |
 |-------------------|------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| ServerBackup      | N/A            | <details><summary>Take backups of servers.</summary>This cog stores details about a server's channels and roles and allows you to use those backups anywhere the bot is present.</details>                                 |
+| ServerBackup      | 1.0.0            | <details><summary>Take backups of servers.</summary>This cog stores details about a server's channels and roles and allows you to use those backups anywhere the bot is present.</details>                                 |
 
 ## Support
 

@@ -1,5 +1,8 @@
+import datetime
+from io import BytesIO
 import secrets
 from typing import Dict, Optional, Union
+import aiohttp
 import discord
 
 from .utils import _proper_overwrites_mapping, _overwrite_mapping_from_json, _overwrite_mapping_json, valid_role_for_template
@@ -7,13 +10,16 @@ from .utils import _proper_overwrites_mapping, _overwrite_mapping_from_json, _ov
 class Template:
     def __init__(self, **kwargs) -> None:
         self.id = kwargs.get('id') or secrets.token_urlsafe(5)
-        self.uses = kwargs.get('uses') or 0
+        self.created_at: datetime.datetime = kwargs.get('created_at') or datetime.datetime.now()
+        self.original_guild_id: int = kwargs.get('original_guild_id')
+        self.owner: int = kwargs.get('owner')
+        self.uses: int = kwargs.get('uses') or 0
         self._roles: list[TemplateRole] = kwargs.get('roles', [])
         self._channels: list[Union[TemplateCategory, TemplateChannel]] = kwargs.get('channels', [])
         
     @staticmethod
     def verify_json(json: dict):
-        return all(key in json for key in ["id", "roles", "channels"])
+        return all(key in json for key in ["id", "roles", "channels", "original_guild_id"])
     
     @staticmethod
     def get_proper_overwrites_with_roles(roles: Dict[str, discord.Role], overwrites: Dict[str, discord.PermissionOverwrite]):
@@ -23,6 +29,9 @@ class Template:
     def json(self):
         return {
             "id": self.id,
+            "created_at": self.created_at.timestamp(),
+            "original_guild_id": self.original_guild_id,
+            "owner": self.owner,
             "uses": self.uses,
             "roles": [role.json for role in self.roles],
             "channels": [channel.json for channel in self._channels],
@@ -35,13 +44,13 @@ class Template:
     @property
     def channels(self):
         return (
-            sorted([i for i in self._channels if isinstance(i, TemplateCategory)], key=lambda channel: channel.position),
-            sorted([i for i in self._channels if isinstance(i, TemplateChannel)], key=lambda channel: channel.position)
+            sorted([i for i in self._channels if isinstance(i, TemplateCategory)], key=lambda channel: channel.position, reverse=True),
+            sorted([i for i in self._channels if isinstance(i, TemplateChannel)], key=lambda channel: channel.position, reverse=True)
             )
         
     async def apply_to_guild(self, guild: discord.Guild):
         reason = "Applying backup on server."
-        [await role.delete(reason=reason) for role in guild.roles]
+        [await role.delete(reason=reason) for role in guild.roles if valid_role_for_template(role)]
         [await category.delete(reason=reason) for category in guild.categories]
         [await channel.delete(reason=reason) for channel in guild.channels]
         
@@ -57,7 +66,11 @@ class Template:
                 permissions=role.permissions
             )
             
+        role = await guild.create_role(reason=reason, name=guild.me.name, permissions=discord.Permissions(administrator=True))
+        await guild.me.add_roles(role)
+            
         categories, channels = self.channels
+        
             
         for category in categories:
             cat = await guild.create_category(
@@ -66,6 +79,7 @@ class Template:
                 reason=reason,
                 position=category.position
             )
+            
                 
             for child in category.children:
                 perms = self.get_proper_overwrites_with_roles(created_roles, child.permissions)
@@ -73,30 +87,45 @@ class Template:
                     await cat.create_voice_channel(name=child.name, overwrites=perms, reason=reason)
                     
                 elif child.type is discord.ChannelType.text:
-                    await cat.create_text_channel(name=child.name, overwrites=perms, reason=reason, position=child.position, topic=channel.topic)
+                    act_chan: discord.TextChannel = await cat.create_text_channel(name=child.name, overwrites=perms, reason=reason, position=child.position, topic=child.topic)
+                    if child.last_messages:
+                        wh = await act_chan.create_webhook(name="new_webhook")
+                        for msg in child.last_messages:
+                            await wh.send(content=msg.content + "\n".join(msg.attachments), embeds=msg.embeds, avatar_url=msg.author_avatar_url, username=msg.author)
                     
+                        
         for channel in channels:
             perms = self.get_proper_overwrites_with_roles(created_roles, channel.permissions)
             if channel.type is discord.ChannelType.voice:
-                await cat.create_voice_channel(name=channel.name, overwrites=perms, reason=reason)
+                await guild.create_voice_channel(name=channel.name, overwrites=perms, reason=reason)
                     
             elif channel.type is discord.ChannelType.text:
-                await cat.create_text_channel(name=channel.name, overwrites=perms, reason=reason, position=channel.position, topic=channel.topic)
+                act_chan = await guild.create_text_channel(name=channel.name, overwrites=perms, reason=reason, position=channel.position, topic=channel.topic)
+                if child.last_messages:
+                    wh = await act_chan.create_webhook(name="new_webhook")
+                    for msg in child.last_messages:
+                        await wh.edit(name=msg.author, avatar=await msg.avatar)
+                        await wh.send(content=msg.content + "\n".join(msg.attachments), embeds=msg.embeds)
+                        
+            await act_chan.send("Backup Restored.")
+                
         
     @classmethod
     def from_json(cls, json: dict):
         if not cls.verify_json(json):
             raise ValueError("Invalid json for Template")
         
+        json["created_at"] = datetime.datetime.fromtimestamp(json["created_at"])
         json["roles"] = [TemplateRole.from_json(role) for role in json["roles"]]
         json["channels"] = [TemplateChannel.from_json(channel) if channel.get("children") is None else TemplateCategory.from_json(channel) for channel in json["channels"]]
         
         return cls(**json)
     
     @classmethod
-    async def from_guild(cls, guild: discord.Guild):
+    async def from_guild(cls, guild: discord.Guild, owner: discord.Member):
         attrs = {
             "id": None,
+            "original_guild_id": guild.id,
             "roles": [],
             "channels": [],
         }
@@ -108,7 +137,8 @@ class Template:
         categories: Dict[str, TemplateCategory] = {}
         channels = []
         for channel in guild.channels:
-            channel: Union[discord.TextChannel, discord.VoiceChannel]
+            if not isinstance(channel, (discord.TextChannel, discord.VoiceChannel)):
+                continue
             if channel.category:
                 if not categories.get(channel.category.name):
                     categories[channel.category.name] = await TemplateCategory.from_category(channel.category)
@@ -118,6 +148,7 @@ class Template:
             channels.append(await TemplateChannel.from_channel(channel))
             
         attrs["channels"] = [category for category in categories.values()] + channels
+        attrs["owner"] = owner.id
         
         return cls(**attrs)
     
@@ -158,10 +189,9 @@ class TemplateCategory:
     async def from_category(cls, category: discord.CategoryChannel):
         self = cls(
             name=category.name,
-            children=None,
+            children=[await TemplateChannel.from_channel(c) for c in category.channels],
             permissions=_proper_overwrites_mapping(category.overwrites)
         )
-        self.children = [await TemplateChannel.from_channel(c, self) for c in category.channels]
         
         return self
 
@@ -172,12 +202,12 @@ class TemplateChannel:
         self.type: discord.ChannelType = kwargs.get('type', discord.ChannelType.text)
         self.permissions: Dict[str, discord.PermissionOverwrite] = kwargs.get("permissions", {})
         self.position: int = kwargs.get("position", 0)
-        self.category: discord.CategoryChannel = kwargs.get("category", None)
+        self.category: TemplateCategory = kwargs.get("category", None)
         self.last_messages: list[TemplateMessage] = kwargs.get("last_messages", [])
         
     @staticmethod
     def verify_json(json: dict):
-        return all(k in json for k in ['name', "topic", "type", 'permissions', 'position', 'category'])
+        return all(k in json for k in ['name', "topic", "type", 'permissions', 'position'])
     
     @property
     def json(self):
@@ -187,7 +217,6 @@ class TemplateChannel:
             "type": self.type.name,
             "permissions": _overwrite_mapping_json(self.permissions),
             "position": self.position,
-            "category": self.category,
             "last_messages": [m.json for m in self.last_messages]
         }
         
@@ -203,18 +232,19 @@ class TemplateChannel:
         return cls(**json)
     
     @classmethod
-    async def from_channel(cls, channel: Union[discord.TextChannel, discord.VoiceChannel], category: Optional[TemplateCategory] = None):
+    async def from_channel(cls, channel: Union[discord.TextChannel, discord.VoiceChannel]):
+        last_messages = []
+        if type(channel) is discord.TextChannel:
+            async for msg in channel.history(limit=3):
+                last_messages.insert(0, TemplateMessage.from_message(msg)) 
+                # so that messages aren't in reversed order lol
         attrs = {
             "name": channel.name,
             "topic": channel.topic,
             "type": channel.type,
             "permissions": _proper_overwrites_mapping(channel.overwrites),
             "position": channel.position,
-            "category": category,
-            "last_messages": [
-                TemplateMessage.from_message(m) async for m in channel.history(limit=3)
-                if type(channel) is discord.TextChannel
-                ]
+            "last_messages": last_messages
         }
         return cls(**attrs)
     
@@ -236,6 +266,16 @@ class TemplateMessage:
             "attachments": self.attachments
         }
         
+    @property
+    def avatar(self):
+        return self.get_avatar_bytes(self.author_avatar_url)
+        
+    @staticmethod
+    async def get_avatar_bytes(avatar_url):
+        async with aiohttp.request("GET", avatar_url) as resp:
+            avatar = BytesIO(await resp.read())
+            return avatar
+        
     @staticmethod
     def verify_json(json: dict):
         return all(k in json for k in ['author', 'author_avatar_url', 'content', 'embeds', 'attachments'])
@@ -253,7 +293,7 @@ class TemplateMessage:
     def from_message(cls, message: discord.Message):
         attrs = {
             "author": str(message.author),
-            "author_avatar_url": message.author.avatar_url,
+            "author_avatar_url": str(message.author.avatar_url),
             "content": message.content,
             "embeds": message.embeds,
             "attachments": [str(a.url) for a in message.attachments]
